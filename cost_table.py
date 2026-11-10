@@ -6,13 +6,15 @@ Routes (all exact, all costs in T gates):
               (4 T, success (n+1)/(2n), failure leaves W_{n-1}).
   hybrid    : optimal mix of CH-tree rebuilds and steps (value iteration).
   tree      : CH tree, deterministic, N = 2^k only, 2(N-2) T.
-  truncate  : W_{2^k} for the smallest 2^k >= N, keep the all-zero outcome.
+  truncate  : best exact W_M with M > N (any route), measure M - N qubits and
+              keep the all-zero outcome (probability N/M); restart on failure.
   rus       : CH tree whose root split is an exact RUS split
               (1:2 -> 2 T, p=3/4; 1:4 -> 4 T, 5.26 expected [Paetznick-Svore];
                1:8 -> 4 T, p=9/32 [this work]).
 """
 import sys
 NMAX = int(sys.argv[1]) if len(sys.argv) > 1 else 24
+MMAX = 2 * NMAX          # largest truncation source considered
 POW2 = [1 << k for k in range(12)]
 
 def tree(n):
@@ -42,10 +44,6 @@ def hybrid(N):
             break
     return V[0]
 
-def truncate(N):
-    k = min(x for x in POW2 if x >= N)
-    return tree(k), N / k, tree(k) * k / N
-
 # root splits a:b with a,b powers of two (ratio 1:r), exact RUS cost
 ROOT = {2: (2, 8 / 3), 4: (4, 5.26), 8: (4, 4 / (9 / 32))}   # r: (T per run, expected T)
 
@@ -59,16 +57,42 @@ def rus(N):
         return t + 2 * (N - 2), e + 2 * (N - 2)
     return None
 
+def direct(N):
+    """Best expected cost of W_N without truncation, and the route used."""
+    cands = {}
+    if N in POW2:
+        cands['tree'] = tree(N)
+    else:
+        ru = rus(N)
+        if ru:
+            cands['rus'] = ru[1]
+    cands['hybrid'] = hybrid(N)
+    cands['step'] = step_only(N)
+    best = min(cands, key=cands.get)       # ties go to the first entry
+    return cands[best], best
+
+def best_table(nmax, mmax):
+    """best[N] = (expected T, route); trunc[N] = (source M, p, expected T).
+    Truncating W_M to W_K and then W_K to W_N costs the same as truncating W_M
+    to W_N directly, so sources are taken from the non-truncation routes only."""
+    dir_ = {M: direct(M) for M in range(3, mmax + 1)}
+    best, trunc = {}, {}
+    for N in range(3, nmax + 1):
+        M = min(range(N + 1, mmax + 1), key=lambda M: dir_[M][0] * M / N)
+        trunc[N] = (M, N / M, dir_[M][0] * M / N)
+        e, route = dir_[N]
+        if trunc[N][2] < e - 1e-9:
+            e, route = trunc[N][2], f'truncate W{M}'
+        best[N] = (e, route)
+    return best, trunc
+
 if __name__ == '__main__':
-    print('N lb step_run step_p step_E hybrid_E tree trunc_T trunc_p trunc_E rus_run rus_E best')
+    best, trunc = best_table(NMAX, MMAX)
+    print('N lb step_run step_p step_E hybrid_E tree trunc_src trunc_p trunc_E rus_run rus_E best')
     for N in range(3, NMAX + 1):
-        so, hy, tr, ru = step_only(N), hybrid(N), truncate(N), rus(N)
+        so, hy, ru, tr = step_only(N), hybrid(N), rus(N), trunc[N]
         det = N in POW2
-        cands = {'step': so, 'hybrid': hy, 'truncate': tr[2]}
-        if det: cands['tree'] = tree(N)
-        if ru and not det: cands['rus'] = ru[1]
-        best = min(cands, key=cands.get)
         print(N, max(4, N - 1), 4 * (N - 2), f'{N}/{2**(N-1)}', f'{so:.1f}', f'{hy:.1f}',
-              tree(N) if det else '-', tr[0], f'{tr[1]:.4f}', f'{tr[2]:.1f}',
+              tree(N) if det else '-', f'W{tr[0]}', f'{N}/{tr[0]}', f'{tr[2]:.1f}',
               ru[0] if ru and not det else '-', f'{ru[1]:.1f}' if ru and not det else '-',
-              f'{cands[best]:.1f}({best})')
+              f'{best[N][0]:.1f}({best[N][1]})')
